@@ -1,0 +1,136 @@
+# Compose lokal zkAPI — cerminan docker/aws/compose.yml untuk pengembangan.
+# Env dari ./envs/*.env (isi GANTI_* dulu). Data di ./data (jangan commit).
+# Jalan: docker compose -f docker-compose.local.yml up --build -d
+# Challenger: tambah --profile challenge (butuh signer.env terisi + sender funded).
+name: zkrpc-local
+
+x-daemon: &daemon
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  entrypoint: ["zkapi-run"]
+  restart: unless-stopped
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=64m"]
+  volumes:
+    - ./data:/data
+  networks: [backend]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  indexer:
+    <<: *daemon
+    command: ["indexer"]
+    env_file:
+      - ./envs/deployment.env
+      - ./envs/indexer.env
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:3001/health"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 60s
+
+  server:
+    <<: *daemon
+    command: ["server"]
+    env_file:
+      - ./envs/deployment.env
+      - ./envs/server.env
+    depends_on:
+      indexer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+
+  challenger:
+    <<: *daemon
+    profiles: ["challenge"]
+    command: ["challenger"]
+    env_file:
+      - ./envs/deployment.env
+      - ./envs/challenge.env
+    depends_on:
+      server:
+        condition: service_healthy
+      signer:
+        condition: service_healthy
+
+  signer:
+    build:
+      context: ./aws/signer
+    profiles: ["challenge"]
+    restart: unless-stopped
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=64m"]
+    env_file:
+      - ./envs/signer.env
+    environment:
+      ZKAPI_CHALLENGE_LISTEN_HOST: 0.0.0.0
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "node", "--input-type=module", "-e", "const r = await fetch('http://127.0.0.1:8547/health', {signal: AbortSignal.timeout(5000)}); if (!r.ok) process.exit(1);"]
+      interval: 10s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/aws/Dockerfile.gateway
+    user: "101:101"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=64m"]
+    volumes:
+      - type: bind
+        source: ./envs/config.json
+        target: /srv/zkapi/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../protocol/setup/v2
+        target: /srv/zkapi/proofs
+        read_only: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [backend]
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 6s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  backend:
+    driver: bridge
