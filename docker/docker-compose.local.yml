@@ -15,6 +15,9 @@ x-daemon: &daemon
   cap_drop: ["ALL"]
   tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=64m"]
   volumes:
+    # Daemon jalan sebagai uid 10001. Folder host HARUS milik 10001,
+    # kalau tidak server gagal "unable to open database file".
+    # Di host (VPS): mkdir -p data && sudo chown 10001:10001 data && chmod 700 data
     - ./data:/data
   networks: [backend]
   logging:
@@ -115,7 +118,8 @@ services:
         target: /srv/zkapi/proofs
         read_only: true
     ports:
-      - "127.0.0.1:8080:8080"
+      # 127.0.0.1 = hanya localhost (dev). 0.0.0.0 = publik (VPS, jaga via firewall/SG).
+      - "${ZKAPI_HTTP_BIND:-127.0.0.1}:8080:8080"
     networks: [backend]
     depends_on:
       server:
