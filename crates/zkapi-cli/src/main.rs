@@ -83,6 +83,10 @@ enum Commands {
         indexer_url: Option<String>,
         #[arg(long, default_value_t = 1_000)]
         root_poll_interval_ms: u64,
+        /// Proxy mode: verify + reserve nullifiers without minting runtime keys.
+        /// Skips the OpenRouter/OA credential requirement (for RPC gateways).
+        #[arg(long, default_value_t = false)]
+        native_reserve_only: bool,
     },
     Indexer {
         #[arg(long, default_value = "127.0.0.1:3001")]
@@ -156,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
             initial_root,
             indexer_url,
             root_poll_interval_ms,
+            native_reserve_only,
         } => {
             let state_seed = resolve_secret(state_seed, std::env::var("ZKAPI_STATE_SEED").ok())
                 .unwrap_or_else(|| "0x1".to_string());
@@ -168,33 +173,37 @@ async fn main() -> anyhow::Result<()> {
             );
             let oa_org_shared_secret =
                 resolve_secret(None, std::env::var("ZKAPI_OA_ORG_SHARED_SECRET").ok());
-            let lease_source = match (openrouter_management_key, oa_org_url, oa_org_shared_secret) {
-                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                    anyhow::bail!(
+            let lease_source = if native_reserve_only {
+                None
+            } else {
+                match (openrouter_management_key, oa_org_url, oa_org_shared_secret) {
+                    (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                        anyhow::bail!(
                         "configure either direct OpenRouter management or OA org key issuance, not both"
                     )
+                    }
+                    (Some(management_key), None, None) => {
+                        Some(OpenRouterLeaseSourceConfig::OpenRouter {
+                            management_key,
+                            api_base: openrouter_api_base_for_leases,
+                        })
+                    }
+                    (None, Some(org_base_url), Some(shared_secret)) => {
+                        Some(OpenRouterLeaseSourceConfig::OaOrg {
+                            org_base_url,
+                            shared_secret,
+                        })
+                    }
+                    (None, Some(_), None) => {
+                        anyhow::bail!("--oa-org-url requires an OA org shared secret")
+                    }
+                    (None, None, Some(_)) => {
+                        anyhow::bail!("an OA org shared secret requires --oa-org-url")
+                    }
+                    (None, None, None) => anyhow::bail!(
+                        "configure an OA org or OpenRouter management credential for native leases"
+                    ),
                 }
-                (Some(management_key), None, None) => {
-                    Some(OpenRouterLeaseSourceConfig::OpenRouter {
-                        management_key,
-                        api_base: openrouter_api_base_for_leases,
-                    })
-                }
-                (None, Some(org_base_url), Some(shared_secret)) => {
-                    Some(OpenRouterLeaseSourceConfig::OaOrg {
-                        org_base_url,
-                        shared_secret,
-                    })
-                }
-                (None, Some(_), None) => {
-                    anyhow::bail!("--oa-org-url requires an OA org shared secret")
-                }
-                (None, None, Some(_)) => {
-                    anyhow::bail!("an OA org shared secret requires --oa-org-url")
-                }
-                (None, None, None) => anyhow::bail!(
-                    "configure an OA org or OpenRouter management credential for native leases"
-                ),
             };
             let openrouter_leases = lease_source.map(|source| OpenRouterLeaseConfig {
                 source,
@@ -228,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
                 root_poll_interval_ms,
                 openrouter_leases,
                 native_billing,
+                native_reserve_only,
                 proof_setup_dir: cli.proof_setup_dir.clone(),
             };
             zkapi_serverd::routes::run_server(config).await?;

@@ -86,7 +86,12 @@ pub struct ServerConfig {
     /// Poll interval for indexer root refresh.
     pub root_poll_interval_ms: u64,
     /// Required prompt-private OpenRouter lease configuration.
+    /// `None` is only legal together with `native_reserve_only` (proxy mode:
+    /// verify + reserve nullifiers without minting runtime keys).
     pub openrouter_leases: Option<OpenRouterLeaseConfig>,
+    /// Proxy mode for RPC gateways: allow verify + reserve without key issuance.
+    /// Set via `--native-reserve-only` / `ZKAPI_NATIVE_RESERVE_ONLY=1`.
+    pub native_reserve_only: bool,
     /// Required native ETH oracle configuration, checked before server startup.
     pub native_billing: Option<crate::native_billing::NativeBillingConfig>,
     /// Directory containing the v2 Groth16 proving/verifying key files.
@@ -110,10 +115,12 @@ impl ServerConfig {
             self.native_billing.is_some(),
             "native ETH billing configuration is required"
         );
-        anyhow::ensure!(
-            self.openrouter_leases.is_some(),
-            "native ETH requires prompt-private leases"
-        );
+        if !self.native_reserve_only {
+            anyhow::ensure!(
+                self.openrouter_leases.is_some(),
+                "native ETH requires prompt-private leases"
+            );
+        }
         anyhow::ensure!(
             self.request_charge_cap > 0
                 && self.request_charge_cap <= crate::native_billing::MAX_SAFE_UNITS,
@@ -139,8 +146,34 @@ impl Default for ServerConfig {
             indexer_url: None,
             root_poll_interval_ms: 1_000,
             openrouter_leases: None,
+            native_reserve_only: false,
             native_billing: None,
             proof_setup_dir: "protocol/setup/v2".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reserve_only_config() -> ServerConfig {
+        ServerConfig {
+            native_billing: Some(crate::test_support::native_config()),
+            native_reserve_only: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reserve_only_mode_boots_without_lease_credentials() {
+        assert!(reserve_only_config().validate_native_mode().is_ok());
+    }
+
+    #[test]
+    fn default_mode_still_requires_lease_credentials() {
+        let mut config = reserve_only_config();
+        config.native_reserve_only = false;
+        assert!(config.validate_native_mode().is_err());
     }
 }

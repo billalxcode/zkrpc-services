@@ -5,6 +5,7 @@
 //! - GET  /v1/attestation           -- published signer metadata for deployments
 //! - POST /v2/openrouter/leases     -- open a prompt-private runtime-key lease
 //! - POST /v2/openrouter/leases/:id -- retire a rejected runtime-key lease
+//! - POST /v2/native/reserve        -- proxy-mode verify + reserve (no key issuance)
 //! - POST /v2/withdraw/clearance    -- request mutual-close clearance
 //! - GET  /v2/requests/:id          -- recover by client_request_id
 //! - GET  /v2/nullifiers/:nullifier -- recover by nullifier
@@ -27,7 +28,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use zkapi_types::wire::{
     ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, ErrorResponse,
-    OpenRouterLeaseStatusResponse, RecoveryResponseV2,
+    NativeReserveResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2,
 };
 use zkapi_types::Felt252;
 
@@ -134,6 +135,7 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
             "/v2/openrouter/leases/{client_request_id}/expire",
             post(handle_native_lease_expiry),
         )
+        .route("/v2/native/reserve", post(handle_native_reserve))
         .route("/v2/withdraw/clearance", post(handle_clearance))
         .route(
             "/v2/requests/{client_request_id}",
@@ -231,6 +233,19 @@ async fn handle_openrouter_lease(
 ) -> Result<(StatusCode, Json<IssuedOpenRouterLease>), ErrorHttpResponse> {
     processor
         .issue_openrouter_lease(&api_request)
+        .await
+        .map(|response| (StatusCode::CREATED, Json(response)))
+        .map_err(|error| error_to_response(&error, &api_request.client_request_id, &processor))
+}
+
+/// Proxy-mode verify + reserve without key issuance (for RPC gateways).
+/// Requires `native_reserve_only`; otherwise 400 invalid_request.
+async fn handle_native_reserve(
+    State(processor): State<AppState>,
+    Json(api_request): Json<ApiRequestV2>,
+) -> Result<(StatusCode, Json<NativeReserveResponse>), ErrorHttpResponse> {
+    processor
+        .issue_native_reservation(&api_request)
         .await
         .map(|response| (StatusCode::CREATED, Json(response)))
         .map_err(|error| error_to_response(&error, &api_request.client_request_id, &processor))

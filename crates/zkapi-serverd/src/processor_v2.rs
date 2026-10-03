@@ -8,7 +8,7 @@ use sha3::{Digest, Keccak256};
 use zkapi_core::v2 as core;
 use zkapi_proof::compact::{random_field, random_scalar, server_update, RequestVerifier};
 use zkapi_types::wire::{
-    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire,
+    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, NativeReserveResponse,
     OpenRouterLeaseAuthorization, OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse,
     RecoveryResponseV2, RequestResponseV2,
 };
@@ -278,6 +278,55 @@ impl RequestProcessor {
             ));
         }
         Ok(expected)
+    }
+
+    /// Reserve one prompt-free zkAPI request WITHOUT minting a runtime key.
+    /// Proxy mode for RPC gateways (`native_reserve_only`): verifies the
+    /// Groth16 proof, freezes the billing quote and reserves the nullifier,
+    /// then returns the USD budget the gateway may convert to CU.
+    /// Every check below mirrors `issue_openrouter_lease`; only the key
+    /// issuance (and its upstream I/O) is removed.
+    pub async fn issue_native_reservation(
+        &self,
+        request: &ApiRequestV2,
+    ) -> Result<NativeReserveResponse, ServerError> {
+        if !self.config.native_reserve_only {
+            return Err(ServerError::InvalidRequest(
+                "native reservations are not enabled on this server".to_string(),
+            ));
+        }
+        let (_authorization, billing_quote) = self.lease_authorization(request)?;
+        // Validate native integer bounds before reserving a nullifier. An
+        // unrepresentable budget must never strand otherwise unused state.
+        let limit_micro_usd = self.lease_limit_micro_usd(request)?;
+        let _issue_guard = self.lease_issue_lock.lock().await;
+        let existing_reservation = self
+            .store
+            .lookup_by_nullifier(&request.public_inputs.request_nullifier);
+        if existing_reservation.is_none() {
+            self.native_oracle
+                .validate(&billing_quote, current_timestamp())
+                .await?;
+            // Oracle reads may span expiry; no await may separate this check
+            // from the synchronous proof validation and reservation below.
+            self.native_oracle
+                .assert_fresh(&billing_quote, current_timestamp())?;
+        }
+        self.validate_and_reserve_native(request)?;
+        // A reservation preserves the accepted request, not permission to mint
+        // new access after its collateral has entered an escape or been paid
+        // out. Check immediately before returning the budget.
+        self.native_oracle
+            .assert_request_unspent(&request.public_inputs.request_nullifier)
+            .await?;
+        Ok(NativeReserveResponse {
+            status: "reserved".to_string(),
+            client_request_id: request.client_request_id.clone(),
+            request_nullifier: request.public_inputs.request_nullifier,
+            solvency_bound: request.public_inputs.solvency_bound,
+            limit_micro_usd,
+            server_time_ms: current_timestamp().saturating_mul(1000),
+        })
     }
 
     /// Reserve one prompt-free zkAPI request and mint its bounded OpenRouter
@@ -1242,6 +1291,99 @@ impl RequestProcessor {
             .assert_fresh(&self.lease_authorization(request)?.1, current_timestamp())?;
         self.store.reserve_openrouter_lease(request)?;
         Ok(None)
+    }
+
+    /// Proxy-mode twin of `validate_and_reserve`: identical checks, but the
+    /// reservation is recorded under kind `"native_reserve"` and a resumed
+    /// byte-identical retry returns `Ok` (the reserve response is derived
+    /// deterministically from the request, so no stored response is needed).
+    fn validate_and_reserve_native(&self, request: &ApiRequestV2) -> Result<(), ServerError> {
+        let public = &request.public_inputs;
+        let payload_hash = canonical_payload_hash(request.payload.as_bytes());
+        if payload_hash != request.payload_hash {
+            return Err(ServerError::InvalidRequest(
+                "payload_hash does not match payload bytes".to_string(),
+            ));
+        }
+        if public.protocol_version != self.config.protocol_version
+            || public.chain_id != self.config.chain_id
+            || public.contract_address != self.config.contract_address
+        {
+            return Err(ServerError::ProtocolMismatch(
+                "version, chain, or contract mismatch".to_string(),
+            ));
+        }
+        let request_binding = api_request_binding(request)?;
+        // A byte-identical request already reserved by this endpoint passed
+        // all checks on its first attempt. Resume it before root/freshness
+        // checks so a transport retry remains possible after those values move.
+        // A different endpoint kind can never claim the reservation.
+        if let Some(existing) = self.store.lookup_by_nullifier(&public.request_nullifier) {
+            let same_request = existing.client_request_id.as_deref()
+                == Some(&request.client_request_id)
+                && existing.payload_hash == Some(request.payload_hash)
+                && existing.reservation_kind == "native_reserve"
+                && existing.api_request_binding.as_deref() == Some(request_binding.as_str());
+            if !same_request {
+                return Err(ServerError::Replay);
+            }
+            return match existing.status {
+                NullifierStatus::Finalized | NullifierStatus::Reserved => Ok(()),
+                NullifierStatus::ClearanceReserved => Err(ServerError::Replay),
+            };
+        }
+        let root = self.current_root();
+        if public.active_root != root {
+            return Err(ServerError::StaleRoot {
+                latest_root: root.to_hex(),
+            });
+        }
+        let state_key = self.state_signing_key();
+        if public.state_signing_key_x != state_key.x || public.state_signing_key_y != state_key.y {
+            return Err(ServerError::InvalidRequest(
+                "state signing key does not match this deployment".to_string(),
+            ));
+        }
+        let now = current_timestamp();
+        if public.request_time.saturating_add(MAX_REQUEST_AGE_SECONDS) < now
+            || public.request_time > now.saturating_add(MAX_FUTURE_SKEW_SECONDS)
+        {
+            return Err(ServerError::InvalidRequest(
+                "request_time is outside the accepted freshness window".to_string(),
+            ));
+        }
+        let required_solvency = self.config.request_charge_cap;
+        if public.solvency_bound < required_solvency {
+            return Err(ServerError::InvalidRequest(format!(
+                "solvency_bound {} is below required {}",
+                public.solvency_bound, required_solvency
+            )));
+        }
+        let context = canonical_request_context(&request.client_request_id, &payload_hash);
+        if core::authorization_tag(&public.request_nullifier, &context) != public.authorization_tag
+        {
+            return Err(ServerError::InvalidProof(
+                "proof authorization tag does not bind this request id and payload".to_string(),
+            ));
+        }
+        if !self
+            .verifier
+            .verify(public, &request.proof)
+            .map_err(|error| ServerError::InvalidProof(error.to_string()))?
+        {
+            return Err(ServerError::InvalidProof(
+                "Groth16 verification returned false".to_string(),
+            ));
+        }
+
+        // Proof verification is synchronous but can be slow. Recheck at the
+        // actual reservation boundary, while issue_native_reservation retains
+        // its serialization lock. A matching existing reservation returned
+        // above and keeps its original quote even after expiration.
+        self.native_oracle
+            .assert_fresh(&self.lease_authorization(request)?.1, current_timestamp())?;
+        self.store.reserve_native(request)?;
+        Ok(())
     }
 
     fn finalize_request(

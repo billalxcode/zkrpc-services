@@ -226,6 +226,12 @@ impl NullifierStore {
         self.reserve_bound_v2(request, "openrouter_lease")
     }
 
+    /// Reserve a proxy-mode request without minting a runtime key.
+    /// Same uniqueness rules as leases: one nullifier, one reservation.
+    pub fn reserve_native(&self, request: &ApiRequestV2) -> Result<(), ServerError> {
+        self.reserve_bound_v2(request, "native_reserve")
+    }
+
     fn reserve_bound_v2(
         &self,
         request: &ApiRequestV2,
@@ -1452,5 +1458,26 @@ mod tests {
             .contains("sk-or-"));
         assert_eq!(store.due_openrouter_leases(20).len(), 0);
         assert_eq!(store.due_openrouter_leases(21).len(), 1);
+    }
+
+    #[test]
+    fn native_reserve_uses_distinct_kind_and_rejects_duplicates() {
+        let store = NullifierStore::in_memory().unwrap();
+        let request = lease_request("native-1", 91);
+        store.reserve_native(&request).unwrap();
+        let record = store
+            .lookup_by_nullifier(&request.public_inputs.request_nullifier)
+            .unwrap();
+        assert_eq!(record.reservation_kind, "native_reserve");
+        // Byte-identical retry hits the primary key: still one reservation.
+        assert!(matches!(
+            store.reserve_native(&request),
+            Err(ServerError::Replay)
+        ));
+        // A lease endpoint can never claim a native reservation kind.
+        assert!(matches!(
+            store.reserve_openrouter_lease(&request),
+            Err(ServerError::Replay)
+        ));
     }
 }

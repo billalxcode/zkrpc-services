@@ -45,6 +45,9 @@ case "${1:-}" in
         if [ -n "${OA_ORG_URL:-}" ]; then
             set -- "$@" --oa-org-url "$OA_ORG_URL"
         fi
+        if [ "${ZKAPI_NATIVE_RESERVE_ONLY:-}" = "1" ]; then
+            set -- "$@" --native-reserve-only
+        fi
         exec "$@"
         ;;
     indexer)

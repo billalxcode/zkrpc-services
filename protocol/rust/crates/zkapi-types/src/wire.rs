@@ -153,6 +153,18 @@ pub struct ClearanceRequest {
     pub withdrawal_nullifier: Felt252,
 }
 
+/// Response for POST /v2/native/reserve (proxy mode, no key issuance).
+/// The USD budget is frozen at reservation; the gateway converts it to CU.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeReserveResponse {
+    pub status: String,
+    pub client_request_id: String,
+    pub request_nullifier: Felt252,
+    pub solvency_bound: u128,
+    pub limit_micro_usd: u128,
+    pub server_time_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::ErrorResponse;
