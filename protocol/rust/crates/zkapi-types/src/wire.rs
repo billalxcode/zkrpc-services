@@ -165,6 +165,23 @@ pub struct NativeReserveResponse {
     pub server_time_ms: u64,
 }
 
+/// Close-out for POST /v2/native/finalize: the gateway reports metered
+/// micro-USD, the server converts with the request's frozen quote and
+/// records the gwei charge. Retries are idempotent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeFinalizeRequest {
+    pub api_request: ApiRequestV2,
+    pub charge_micro_usd: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeFinalizeResponse {
+    pub status: String,
+    pub client_request_id: String,
+    pub request_nullifier: Felt252,
+    pub charge_applied: u128,
+}
+
 #[cfg(test)]
 mod tests {
     use super::ErrorResponse;

@@ -6,6 +6,7 @@
 //! - POST /v2/openrouter/leases     -- open a prompt-private runtime-key lease
 //! - POST /v2/openrouter/leases/:id -- retire a rejected runtime-key lease
 //! - POST /v2/native/reserve        -- proxy-mode verify + reserve (no key issuance)
+//! - POST /v2/native/finalize       -- proxy-mode settle close-out (idempotent)
 //! - POST /v2/withdraw/clearance    -- request mutual-close clearance
 //! - GET  /v2/requests/:id          -- recover by client_request_id
 //! - GET  /v2/nullifiers/:nullifier -- recover by nullifier
@@ -28,7 +29,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 use zkapi_types::wire::{
     ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, ErrorResponse,
-    NativeReserveResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2,
+    NativeFinalizeRequest, NativeFinalizeResponse, NativeReserveResponse,
+    OpenRouterLeaseStatusResponse, RecoveryResponseV2,
 };
 use zkapi_types::Felt252;
 
@@ -136,6 +138,7 @@ pub fn create_router(processor: Arc<RequestProcessor>) -> Router {
             post(handle_native_lease_expiry),
         )
         .route("/v2/native/reserve", post(handle_native_reserve))
+        .route("/v2/native/finalize", post(handle_native_finalize))
         .route("/v2/withdraw/clearance", post(handle_clearance))
         .route(
             "/v2/requests/{client_request_id}",
@@ -249,6 +252,20 @@ async fn handle_native_reserve(
         .await
         .map(|response| (StatusCode::CREATED, Json(response)))
         .map_err(|error| error_to_response(&error, &api_request.client_request_id, &processor))
+}
+
+/// Proxy-mode settle close-out (for RPC gateways).
+/// Requires `native_reserve_only`; retries are idempotent.
+async fn handle_native_finalize(
+    State(processor): State<AppState>,
+    Json(finalize): Json<NativeFinalizeRequest>,
+) -> Result<Json<NativeFinalizeResponse>, ErrorHttpResponse> {
+    let client_request_id = finalize.api_request.client_request_id.clone();
+    processor
+        .finalize_native_reservation(&finalize, &finalize.api_request)
+        .await
+        .map(Json)
+        .map_err(|error| error_to_response(&error, &client_request_id, &processor))
 }
 
 async fn handle_openrouter_lease_status(

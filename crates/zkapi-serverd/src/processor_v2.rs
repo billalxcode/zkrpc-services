@@ -8,9 +8,9 @@ use sha3::{Digest, Keccak256};
 use zkapi_core::v2 as core;
 use zkapi_proof::compact::{random_field, random_scalar, server_update, RequestVerifier};
 use zkapi_types::wire::{
-    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, NativeReserveResponse,
-    OpenRouterLeaseAuthorization, OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse,
-    RecoveryResponseV2, RequestResponseV2,
+    ApiRequestV2, ClearanceRequest, ClearanceResponseV2, CurvePointWire, NativeFinalizeRequest,
+    NativeFinalizeResponse, NativeReserveResponse, OpenRouterLeaseAuthorization,
+    OpenRouterLeaseResponse, OpenRouterLeaseStatusResponse, RecoveryResponseV2, RequestResponseV2,
 };
 use zkapi_types::{
     canonical_payload_hash, canonical_request_context, canonical_response_hash, Felt252,
@@ -1386,6 +1386,95 @@ impl RequestProcessor {
         Ok(())
     }
 
+    /// Close out a proxy-mode reservation with the metered micro-USD charge.
+    /// Converts with the request's frozen quote (never a fresh one), caps at
+    /// the proven solvency bound, and records the gwei charge. Retries with a
+    /// byte-identical request return the recorded charge (idempotent).
+    pub async fn finalize_native_reservation(
+        &self,
+        finalize: &NativeFinalizeRequest,
+        request: &ApiRequestV2,
+    ) -> Result<NativeFinalizeResponse, ServerError> {
+        if !self.config.native_reserve_only {
+            return Err(ServerError::InvalidRequest(
+                "native reservations are not enabled on this server".to_string(),
+            ));
+        }
+        let request_binding = api_request_binding(request)?;
+        let existing = self
+            .store
+            .lookup_by_nullifier(&request.public_inputs.request_nullifier)
+            .ok_or_else(|| {
+                ServerError::InvalidRequest("no native reservation for this nullifier".to_string())
+            })?;
+        let same_request = existing.client_request_id.as_deref()
+            == Some(&request.client_request_id)
+            && existing.payload_hash == Some(request.payload_hash)
+            && existing.reservation_kind == "native_reserve"
+            && existing.api_request_binding.as_deref() == Some(request_binding.as_str());
+        if !same_request {
+            return Err(ServerError::Replay);
+        }
+        // Idempotent retry: a finalized reservation reports its recorded charge.
+        if existing.status == NullifierStatus::Finalized {
+            return Ok(NativeFinalizeResponse {
+                status: "finalized".to_string(),
+                client_request_id: request.client_request_id.clone(),
+                request_nullifier: request.public_inputs.request_nullifier,
+                charge_applied: existing.charge_applied.unwrap_or(0),
+            });
+        }
+        if existing.status != NullifierStatus::Reserved {
+            return Err(ServerError::Replay);
+        }
+        let quote = self.lease_authorization(request)?.1;
+        let charge = quote.charge_units(finalize.charge_micro_usd)?;
+        if charge > request.public_inputs.solvency_bound {
+            return Err(ServerError::InvalidRequest(format!(
+                "charge {} exceeds proven solvency {}",
+                charge, request.public_inputs.solvency_bound
+            )));
+        }
+        let payload = serde_json::json!({
+            "type": "native_reserve_settlement",
+            "client_request_id": request.client_request_id,
+            "charge_micro_usd": finalize.charge_micro_usd,
+            "charge_applied": charge,
+        });
+        self.store.finalize(
+            &request.public_inputs.request_nullifier,
+            &TranscriptRecord {
+                nullifier: request.public_inputs.request_nullifier,
+                status: NullifierStatus::Finalized,
+                reservation_kind: "native_reserve".to_string(),
+                client_request_id: Some(request.client_request_id.clone()),
+                payload_hash: Some(request.payload_hash),
+                charge_applied: Some(charge),
+                response_code: Some(200),
+                response_payload: Some(payload.to_string()),
+                response_hash: None,
+                next_commitment_x: None,
+                next_commitment_y: None,
+                next_anchor: None,
+                blind_delta_srv: None,
+                next_state_sig: None,
+                policy_reason_code: None,
+                policy_evidence_hash: None,
+                proof_blob: None,
+                request_inputs_json: None,
+                api_request_binding: Some(request_binding),
+                created_at: current_timestamp(),
+                finalized_at: None,
+            },
+        )?;
+        Ok(NativeFinalizeResponse {
+            status: "finalized".to_string(),
+            client_request_id: request.client_request_id.clone(),
+            request_nullifier: request.public_inputs.request_nullifier,
+            charge_applied: charge,
+        })
+    }
+
     fn finalize_request(
         &self,
         request: &ApiRequestV2,
@@ -1769,6 +1858,97 @@ mod tests {
         request.proof.proof = base64::engine::general_purpose::STANDARD.encode(b"verified-proof");
         processor.store.reserve_openrouter_lease(&request).unwrap();
         request
+    }
+
+    fn native_reserve_processor(store: Arc<NullifierStore>) -> RequestProcessor {
+        let state_seed = Felt252::from_u64(11);
+        let clear_seed = Felt252::from_u64(12);
+        let signer = Arc::new(ServerSigner::new(&state_seed, &clear_seed));
+        RequestProcessor::try_new(
+            ServerConfig {
+                request_charge_cap: 1,
+                contract_address: Felt252::from_u64(1),
+                native_billing: Some(crate::test_support::native_config()),
+                proof_setup_dir: setup_directory(),
+                openrouter_leases: None,
+                native_reserve_only: true,
+                ..Default::default()
+            },
+            store,
+            signer,
+            Felt252::ZERO,
+        )
+        .unwrap()
+    }
+
+    fn reserved_native_request(processor: &RequestProcessor) -> ApiRequestV2 {
+        let request = unverified_lease_request(processor);
+        processor.store.reserve_native(&request).unwrap();
+        request
+    }
+
+    #[tokio::test]
+    async fn native_finalize_records_charge_and_replays_idempotently() {
+        let store = Arc::new(NullifierStore::in_memory().unwrap());
+        let processor = native_reserve_processor(store);
+        let request = reserved_native_request(&processor);
+        let finalize = NativeFinalizeRequest {
+            api_request: request.clone(),
+            charge_micro_usd: 1_000,
+        };
+        let first = processor
+            .finalize_native_reservation(&finalize, &request)
+            .await
+            .unwrap();
+        assert_eq!(first.status, "finalized");
+        // $1000/ETH fixture: 1000 micro-USD = 1000 gwei.
+        assert_eq!(first.charge_applied, 1_000);
+        let second = processor
+            .finalize_native_reservation(&finalize, &request)
+            .await
+            .unwrap();
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn native_finalize_rejects_over_solvency_charge_and_unknown_nullifier() {
+        let store = Arc::new(NullifierStore::in_memory().unwrap());
+        let processor = native_reserve_processor(store);
+        let request = reserved_native_request(&processor);
+        // solvency_bound is 3_000_000 gwei; this charge exceeds it.
+        let over = NativeFinalizeRequest {
+            api_request: request.clone(),
+            charge_micro_usd: 3_000_000_000,
+        };
+        assert!(processor
+            .finalize_native_reservation(&over, &request)
+            .await
+            .is_err());
+        let mut unknown = request.clone();
+        unknown.client_request_id = "no-such-reservation".to_string();
+        let missing = NativeFinalizeRequest {
+            api_request: unknown.clone(),
+            charge_micro_usd: 1,
+        };
+        assert!(processor
+            .finalize_native_reservation(&missing, &unknown)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn native_finalize_requires_reserve_only_mode() {
+        let store = Arc::new(NullifierStore::in_memory().unwrap());
+        let processor = oa_lease_processor(store);
+        let request = unverified_lease_request(&processor);
+        let finalize = NativeFinalizeRequest {
+            api_request: request.clone(),
+            charge_micro_usd: 1,
+        };
+        assert!(processor
+            .finalize_native_reservation(&finalize, &request)
+            .await
+            .is_err());
     }
 
     #[derive(Default)]

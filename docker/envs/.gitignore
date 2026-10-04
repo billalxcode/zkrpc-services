@@ -1,0 +1,4 @@
+# Secret + data lokal. Contoh isi lihat file *.env yang sudah ada.
+*.env
+config.json
+data/
