@@ -118,8 +118,7 @@ services:
         target: /srv/zkapi/proofs
         read_only: true
     ports:
-      # 127.0.0.1 = hanya localhost (dev). 0.0.0.0 = publik (VPS, jaga via firewall/SG).
-      - "${ZKAPI_HTTP_BIND:-127.0.0.1}:8080:8080"
+      - "8080:8080"
     networks: [backend]
     depends_on:
       server:
