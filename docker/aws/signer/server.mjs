@@ -53,7 +53,7 @@ async function main() {
     privateKey: process.env.ZKAPI_CHALLENGE_PRIVATE_KEY,
     chainId: parseChainId(process.env.ZKAPI_CHALLENGE_CHAIN_ID),
     vault: process.env.ZKAPI_CHALLENGE_VAULT,
-    rpc: createUpstream(process.env.ZKAPI_CHALLENGE_RPC_URL),
+    rpc: createUpstream(process.env.ZKAPI_SIGNER_UPSTREAM_RPC_URL || process.env.ZKAPI_CHALLENGE_RPC_URL),
     maxGas: BigInt(process.env.ZKAPI_CHALLENGE_MAX_GAS ?? '12000000'),
     maxGasPrice: BigInt(process.env.ZKAPI_CHALLENGE_MAX_GAS_PRICE_WEI ?? '10000000000'),
   });

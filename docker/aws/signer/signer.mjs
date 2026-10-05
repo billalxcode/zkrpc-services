@@ -1,7 +1,7 @@
 import { Interface, Wallet, getAddress, isHexString } from 'ethers';
 
 export function parseChainId(value) {
-  if (value !== '1' && value !== '11155111') throw new Error('Explicit challenge chain ID must be 1 or 11155111');
+  if (value !== '1' && value !== '11155111' && value !== '4663') throw new Error('Explicit challenge chain ID must be 1, 11155111, or 4663');
   return BigInt(value);
 }
 export const CHALLENGE_ABI = 'function challengeEscapeWithdrawal(uint32 noteId,(uint16 protocolVersion,uint64 chainId,address contractAddress,uint256 activeRoot,uint256 stateSigningKeyX,uint256 stateSigningKeyY,uint64 requestTime,uint128 solvencyBound,uint256 requestNullifier,uint256 authorizationTag,uint256 anonymousCommitmentX,uint256 anonymousCommitmentY) inputs,bytes proof,uint256[32] siblings)';
@@ -52,7 +52,7 @@ export function createUpstream(url) {
 }
 
 export function createSigner({ privateKey, vault, rpc, chainId, maxGas = 12_000_000n, maxGasPrice = 10_000_000_000n }) {
-  requireValid(chainId === 1n || chainId === 11155111n, 'Explicit challenge chain ID must be 1 or 11155111');
+  requireValid(chainId === 1n || chainId === 11155111n || chainId === 4663n, 'Explicit challenge chain ID must be 1, 11155111, or 4663');
   const wallet = new Wallet(privateKey);
   const sender = wallet.address.toLowerCase();
   const destination = address(vault);

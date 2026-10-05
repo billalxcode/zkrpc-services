@@ -132,9 +132,10 @@ test('upstream enforces encrypted remote transport and sanitizes network errors'
 
 
 test('requires an explicit supported chain without a Sepolia fallback', () => {
-  for (const value of [undefined, null, '', '01', '0x1', '11155111 ', '137', 1]) assert.throws(() => parseChainId(value));
+  for (const value of [undefined, null, '', '01', '0x1', '11155111 ', '137', '46630', 1]) assert.throws(() => parseChainId(value));
   assert.equal(parseChainId('1'), 1n);
   assert.equal(parseChainId('11155111'), 11155111n);
+assert.equal(parseChainId('4663'), 4663n);
   for (const chainId of [undefined, 1, '1', 0n, 137n]) assert.throws(() => fixture({}, { chainId }), RpcError);
 });
 

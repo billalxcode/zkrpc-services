@@ -1,0 +1,37 @@
+{
+    "deployment_id": "zkrpc-native-eth-robinhood-v1",
+    "chain_id": 4663,
+    "contract_address": "0xCe1e6722256885bF93fDc4C868496C5493062965",
+    "billing_token_address": null,
+    "protocol_server_url": "https://gateway-robinhood.zkrpc.net",
+    "indexer_url": "https://gateway-robinhood.zkrpc.net",
+    "request_charge_cap": 1000000,
+    "state_signing_key": {
+        "x": "0x2da5fa7880ed9c1ab102edba9ab3660e699b24074a74fd16c34489f22efd63c4",
+        "y": "0x23fec8ffb4e100412f677c07430d0b0d4c06aa6e97d383fe8b64a695fd5d26d8"
+    },
+    "clearance_signing_key": {
+        "x": "0x2f1a46b7153ab347f3ca4602ab56ae1af678d027bffa21f9ff5e414f03edb5cd",
+        "y": "0xe1ced784a0212db4e56b465e249618fe89e9df12c520f26586b48cadbf98ad6"
+    },
+    "protocol_version": 2,
+    "proof_setup": {
+        "repository_path": "protocol/setup/v2",
+        "circuit_id": "zkapi-v2-note-bound-v1",
+        "request_proving_key_sha256": "c894b261a13f571d0df36be29734aabf2a8cd7162baddc5e08a50341aa076584",
+        "request_verifying_key_sha256": "8011244c99fa1a8524870906462d430fc86366b8ad821736c5fa726b479e6d97",
+        "withdrawal_proving_key_sha256": "8e41398092fdd02b9ff86c6ccbecbd7ce2402e6f22ec162e6124d1d04fe0a668",
+        "withdrawal_verifying_key_sha256": "2a8ea7f07176e369a93d1d816124192a798d1466c99fd6dc47850ba82094b679"
+    },
+    "proof_backend": "groth16_bn254",
+    "rpc_url": "https://rpc.mainnet.chain.robinhood.com",
+    "billing_asset": "native_eth",
+    "billing_unit": "gwei",
+    "native_asset_wei_per_unit": "1000000000",
+    "native_price_feed_address": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9",
+    "native_price_feed_decimals": 8,
+    "native_price_feed_max_age_seconds": 4500,
+    "request_proving_key_sha256": "c894b261a13f571d0df36be29734aabf2a8cd7162baddc5e08a50341aa076584",
+    "withdrawal_proving_key_sha256": "8e41398092fdd02b9ff86c6ccbecbd7ce2402e6f22ec162e6124d1d04fe0a668",
+    "circuit_id": "zkapi-v2-note-bound-v1"
+}
